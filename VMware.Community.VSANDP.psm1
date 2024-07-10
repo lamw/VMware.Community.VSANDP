@@ -126,6 +126,22 @@ Function Connect-VSANDataProtection {
     $global:vsanDPConnection | Out-Null
 }
 
+Function Get-FriendlyVMName {
+    Param (
+        [Parameter(Mandatory=$True)][String[]]$Morefs
+    )
+
+    $newVMs = @()
+    foreach ($moref in $Morefs) {
+        $vmRef = New-Object VMware.Vim.ManagedObjectReference
+        $vmRef.Type = "VirtualMachine"
+        $vmRef.Value = $moref
+        $VM = Get-View $vmRef -Property Name
+        $newVMs+=$VM.Name
+    }
+    return $newVMs
+}
+
 Function Get-VSANDataProtectionVersion {
     <#
         .NOTES
@@ -231,15 +247,9 @@ Function Get-VSANDataProtectionGroup {
 
             $newResults = @()
             for($i=0; $i -lt $originalResults.Count; $i++){
+
                 # VM output is not user friendly, this converts MoRef ID to human readable labels
-                $newVMs = @()
-                foreach ($moref in $originalResults[$i].info.vms) {
-                    $vmRef = New-Object VMware.Vim.ManagedObjectReference
-                    $vmRef.Type = "VirtualMachine"
-                    $vmRef.Value = $moref
-                    $VM = Get-View $vmRef -Property Name
-                    $newVMs+=$VM.Name
-                }
+                $newVMs = Get-FriendlyVMName -Morefs $originalResults[$i].info.vms
 
                 $tmpResult = $originalResults[$i]
                 $tmpResult.info.target_entities.vms = $newVMs
@@ -521,6 +531,231 @@ Function Remove-VSANDataProtectionGroup {
 
         if($requests.StatusCode -eq 202) {
             Write-Host -ForegroundColor Cyan  "Removing vSAN DP Group ${Name}"
+        }
+    }
+}
+
+Function Get-VSANDataProtectionGroupSnapshot {
+    <#
+        .NOTES
+        ===========================================================================
+        Created by:    William Lam
+        Date:          07/10/2024
+        Organization:  Broadcom
+        Blog:          http://www.williamlam.com
+        Twitter:       @lamw
+        ===========================================================================
+        .SYNOPSIS
+            Returns all snapshots for a vSAN Data Protection Group
+        .DESCRIPTION
+            This cmdlet returns all snapshots for a vSAN Data Protection Groups
+        .PARAMETER Name
+            The name of a specific snapshot for a given vSAN Data Protection Group to filter on
+        .PARAMETER ClusterName
+            The name of a vSAN Cluster to list all vSAN Data Protection Groups
+        .PARAMETER ProtectionGroupName
+            The name of the vSAN Data Protection Group
+        .PARAMETER Troubleshoot
+            Displays additional output showing both HTTP method and URL for vSAN Data Protection API request
+        .EXAMPLE
+            Get-VSANDataProtectionGroupSnapshot -ClusterName "vSAN-ESA-Cluster" -ProtectionGroupName "VSAN-DP-1"
+        .EXAMPLE
+            Get-VSANDataProtectionGroupSnapshot -ClusterName "vSAN-ESA-Cluster" -ProtectionGroupName "VSAN-DP-1" -Name "My-Snapshot"
+    #>
+    Param (
+        [Parameter(Mandatory=$False)]$Name,
+        [Parameter(Mandatory=$True)]$ClusterName,
+        [Parameter(Mandatory=$True)]$ProtectionGroupName,
+        [Switch]$Troubleshoot
+    )
+
+    If (-Not $global:vsanDPConnection -or -Not $global:DefaultVIServer) { Write-error "No vSAN Data Protection or VI Server Connection found, please use Connect-VSANDataProtection and/or Connect-VIServer" } Else {
+
+        $ClusterMoRef = (Get-Cluster -Name $ClusterName).ExtensionData.MoRef.Value
+        if($ClusterMoRef -eq $null) {
+            Write-Error "Unable to find $ClusterName"
+            break
+        }
+
+        $pg = Get-VSANDataProtectionGroup -ClusterName $ClusterName -Name $ProtectionGroupName
+
+        $method = "GET"
+        $snapshotURL = $global:vsanDPConnection.Server + "/clusters/${ClusterMoRef}/protection-groups/$(${pg}.Id)/snapshots"
+
+        if($Troubleshoot) {
+            Write-Host -ForegroundColor cyan "`n[DEBUG] - $method`n$snapshotURL`n"
+        }
+
+        try {
+            $requests = Invoke-WebRequest -Uri $snapshotURL -Method $method -Headers $global:vsanDPConnection.headers -SkipCertificateCheck
+        } catch {
+            Write-Error "Error in retrieving snapshots for vSAN DP Protection Group ${ProtectionGroupName}"
+            Write-Error "`n($_.Exception.Message)`n"
+            break
+        }
+
+        if($requests.StatusCode -eq 200) {
+            $snapshots = ($requests.Content | ConvertFrom-Json).snapshots
+
+            $results = @()
+            foreach ($snapshot in $snapshots) {
+                $tmp = [pscustomobject][ordered] @{
+                    Id = $snapshot.snapshot
+                    Name = $snapshot.info.name
+                    Type = $snapshot.info.snapshot_type
+                    VMs = $snapshot.info.vm_snapshots.count
+                    Expiration = $snapshot.info.expires_at
+                    StartTime = $snapshot.info.start_time
+                    EndTime = $snapshot.info.end_time
+                    Snapshots = $snapshot.info.vm_snapshots
+                }
+                $results+=$tmp
+            }
+
+            if ($PSBoundParameters.ContainsKey("Name")){
+                $results | where {$_.Name -eq $Name}
+            } else {
+                $results
+            }
+        }
+    }
+}
+
+Function New-VSANDataProtectionGroupSnapshot {
+    <#
+        .NOTES
+        ===========================================================================
+        Created by:    William Lam
+        Date:          07/10/2024
+        Organization:  Broadcom
+        Blog:          http://www.williamlam.com
+        Twitter:       @lamw
+        ===========================================================================
+        .SYNOPSIS
+            Returns all snapshots for a vSAN Data Protection Group
+        .DESCRIPTION
+            This cmdlet creates a snapshots for a vSAN Data Protection Groups
+        .PARAMETER Name
+            The name of the snapshot
+        .PARAMETER ClusterName
+            The name of a vSAN Cluster to list all vSAN Data Protection Groups
+        .PARAMETER ProtectionGroupName
+            The name of the vSAN Data Protection Group
+        .PARAMETER Troubleshoot
+            Displays additional output showing both HTTP method and URL for vSAN Data Protection API request
+        .EXAMPLE
+            New-VSANDataProtectionGroupSnapshot -ClusterName "vSAN-ESA-Cluster" -ProtectionGroupName "VSAN-DP-1" -Name "My-Snapshot" -RetentionInterval 10 -RetentionUnit DAY
+    #>
+    Param (
+        [Parameter(Mandatory=$True)]$Name,
+        [Parameter(Mandatory=$True)]$ClusterName,
+        [Parameter(Mandatory=$True)]$ProtectionGroupName,
+        [Parameter(Mandatory=$True)][Int]$RetentionInterval,
+        [Parameter(Mandatory=$True)][ValidateSet("MINUTE","HOUR","DAY","WEEK","MONTH")][String]$RetentionUnit,
+        [Switch]$Troubleshoot
+    )
+
+    If (-Not $global:vsanDPConnection -or -Not $global:DefaultVIServer) { Write-error "No vSAN Data Protection or VI Server Connection found, please use Connect-VSANDataProtection and/or Connect-VIServer" } Else {
+
+        $ClusterMoRef = (Get-Cluster -Name $ClusterName).ExtensionData.MoRef.Value
+        if($ClusterMoRef -eq $null) {
+            Write-Error "Unable to find $ClusterName"
+            break
+        }
+
+        $pg = Get-VSANDataProtectionGroup -ClusterName $ClusterName -Name $ProtectionGroupName
+
+        $method = "POST"
+        $snapshotURL = $global:vsanDPConnection.Server + "/clusters/${ClusterMoRef}/protection-groups/$(${pg}.Id)/snapshots?vmw-task=true"
+
+        $payload = @{
+            "name" = $Name
+            "retention" = @{
+                "duration" = $RetentionInterval
+                "unit" = $RetentionUnit
+            }
+        }
+
+        $body = $payload | ConvertTo-Json -depth 2
+
+        if($Troubleshoot) {
+            Write-Host -ForegroundColor cyan "`n[DEBUG] - $method`n$snapshotURL`n"
+            Write-Host -ForegroundColor cyan "[DEBUG]`n$body`n"
+        }
+
+        try {
+            $requests = Invoke-WebRequest -Uri $snapshotURL -Method $method -Body $body -Headers $global:vsanDPConnection.headers -SkipCertificateCheck
+        } catch {
+            Write-Error "Error in creating snapshot for vSAN DP Protection Group ${ProtectionGroupName}"
+            Write-Error "`n($_.Exception.Message)`n"
+            break
+        }
+
+        if($requests.StatusCode -eq 202) {
+            Write-Host -ForegroundColor Cyan "Creating snapshot ${Name} for vSAN DP Group ${ProtectionGroupName}"
+        }
+    }
+}
+
+Function Remove-VSANDataProtectionGroupSnapshot {
+    <#
+        .NOTES
+        ===========================================================================
+        Created by:    William Lam
+        Date:          07/10/2024
+        Organization:  Broadcom
+        Blog:          http://www.williamlam.com
+        Twitter:       @lamw
+        ===========================================================================
+        .SYNOPSIS
+            Removes specific snapshot for a vSAN Data Protection Group
+        .DESCRIPTION
+            This cmdlet removes specific snapshot for a vSAN Data Protection Groups
+        .PARAMETER Name
+            The name of the snapshot to remove
+        .PARAMETER ClusterName
+            The name of a vSAN Cluster to list all vSAN Data Protection Groups
+        .PARAMETER ProtectionGroupName
+            The name of the vSAN Data Protection Group
+        .PARAMETER Troubleshoot
+            Displays additional output showing both HTTP method and URL for vSAN Data Protection API request
+        .EXAMPLE
+            Remove-VSANDataProtectionGroupSnapshot -ClusterName "vSAN-ESA-Cluster" -ProtectionGroupName "VSAN-DP-1" -Name "My-Snapshot"
+    #>
+    Param (
+        [Parameter(Mandatory=$True)]$Name,
+        [Parameter(Mandatory=$True)]$ClusterName,
+        [Parameter(Mandatory=$True)]$ProtectionGroupName,
+        [Switch]$Troubleshoot
+    )
+
+    If (-Not $global:vsanDPConnection -or -Not $global:DefaultVIServer) { Write-error "No vSAN Data Protection or VI Server Connection found, please use Connect-VSANDataProtection and/or Connect-VIServer" } Else {
+
+        $ClusterMoRef = (Get-Cluster -Name $ClusterName).ExtensionData.MoRef.Value
+        if($ClusterMoRef -eq $null) {
+            Write-Error "Unable to find $ClusterName"
+            break
+        }
+
+        $snapshot = Get-VSANDataProtectionGroupSnapshot -ClusterName $ClusterName -ProtectionGroupName $ProtectionGroupName -Name $Name
+
+        $method = "DELETE"
+        $snapshotURL = $global:vsanDPConnection.Server + "/clusters/${ClusterMoRef}/protection-groups/$(${pg}.Id)/snapshots/$(${snapshot}.id)"
+
+        if($Troubleshoot) {
+            Write-Host -ForegroundColor cyan "`n[DEBUG] - $method`n$snapshotURL`n"
+        }
+
+        try {
+            $requests = Invoke-WebRequest -Uri $snapshotURL -Method $method -Headers $global:vsanDPConnection.headers -SkipCertificateCheck
+        } catch {
+            Write-Error "Error in deleting snapshot for vSAN DP Protection Group ${ProtectionGroupName}"
+            Write-Error "`n($_.Exception.Message)`n"
+            break
+        }
+
+        if($requests.StatusCode -eq 204) {
+            Write-Host -ForegroundColor Cyan "Deleting snapshot ${Name} for vSAN DP Group ${ProtectionGroupName}"
         }
     }
 }

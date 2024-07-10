@@ -25,3 +25,5 @@ Install-Module VMware.Community.VSANDP
 * Get-VSANDataProtectionGroup
 * New-VSANDataProtectionGroup
 * Remove-VSANDataProtectionGroup
+* New-VSANDataProtectionGroupSnapshot
+* Remove-VSANDataProtectionGroupSnapshot
