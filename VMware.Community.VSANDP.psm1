@@ -249,10 +249,14 @@ Function Get-VSANDataProtectionGroup {
             for($i=0; $i -lt $originalResults.Count; $i++){
 
                 # VM output is not user friendly, this converts MoRef ID to human readable labels
-                $newVMs = Get-FriendlyVMName -Morefs $originalResults[$i].info.vms
+                if($originalResults[$i].info.vms -ne $null) {
+                    $newVMs = Get-FriendlyVMName -Morefs $originalResults[$i].info.vms
 
-                $tmpResult = $originalResults[$i]
-                $tmpResult.info.target_entities.vms = $newVMs
+                    $tmpResult = $originalResults[$i]
+                    $tmpResult.info.target_entities.vms = $newVMs
+                } else {
+                    $newVMs = $null
+                }
 
                 $tmp = [PSCustomObject][ordered]@{
                     Id = $originalResults[$i].pg
